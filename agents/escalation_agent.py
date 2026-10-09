@@ -9,7 +9,7 @@ from datetime import datetime
 
 client = Anthropic()
 
-# ── v2 improvement (Week 4): semantic escalation tier ────────────────────────
+# ── v2 improvement: semantic escalation tier ─────────────────────────────────
 # Gated behind HUB_V2 so the shipped app keeps the original keyword behavior by
 # default. Fixes the dominant baseline failure mode: paraphrased emergencies
 # (e.g. "I feel like I'm suffocating", "an elephant on my chest") that the literal

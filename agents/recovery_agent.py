@@ -396,7 +396,7 @@ def _run_monitoring_logic(state: dict, check_in_responses: dict) -> dict:
             "escalation_reason": None
         }
 
-    # ── v2 improvement (Week 4): dyspnea under-classification guardrail ──────────
+    # ── v2 improvement: dyspnea under-classification guardrail ──────────────────
     # Gated behind HUB_V2. Fixes the recurring baseline miss on borderline cases like
     # "a little short of breath when I carried laundry" that intermittently classify
     # GREEN. Any NON-NEGATED shortness-of-breath language forces at least YELLOW
