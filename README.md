@@ -1,235 +1,157 @@
 # Hub
-## Post-Hospital Recovery Co-Pilot — 2-Agent Architecture | Companion project to Nexus
+### What does a multi-agent architecture actually cost? A measured redesign of Nexus.
 
-Hub is a deliberately minimal redesign of [Nexus](https://github.com/raghavanlakshmi/nexus), built to answer one question with running code instead of theory:
+[![tests](https://github.com/raghavanlakshmi/hub/actions/workflows/tests.yml/badge.svg)](https://github.com/raghavanlakshmi/hub/actions/workflows/tests.yml)
+![python](https://img.shields.io/badge/python-3.11-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
 
-> If you collapse Nexus's five agents into a single agent and keep **only** the one load-bearing boundary — the gate in front of Escalation — what actually changes in tokens, cost, latency, and orchestration complexity?
+Hub is a deliberately minimal redesign of [Nexus](https://github.com/raghavanlakshmi/nexus), a post-hospital
+recovery co-pilot. It answers one question with running code instead of theory:
 
-Same tools, same prompts, same model, same Streamlit UI. The **only** thing that differs is how the work is orchestrated.
+> If you collapse Nexus's five agents into one and keep **only** the boundary that matters — the gate in
+> front of Escalation — what changes in quality, cost, latency and complexity?
 
----
+Same tools, same prompts, same model, same UI. Only the orchestration differs.
 
-### The hypothesis
+## Results
 
-Nexus's five agents (Intake → Care Plan → Monitoring → Escalation → Admin) are mostly a **sequential, dependent pipeline** reasoning about one patient — not independent specialists. Only one hand-off is genuinely a judgment call that can trigger a real-world action (an SMS, a 911 screen): the gate into **Escalation**.
+Measured on a 30-case hand-labelled golden dataset
+([full evaluation](https://github.com/raghavanlakshmi/nexus-hub-eval)):
 
-Hub keeps that one boundary as a real graph edge and collapses everything else into a single **Recovery Agent** that branches internally on `state["phase"]`.
+| Metric | Nexus (5 agents) | Hub v1 (1 agent + escalation) | Hub v2 (+ escalation fix) |
+|---|---|---|---|
+| Check-in classification accuracy | 96.7% | 96.7% | **100%** |
+| Escalation-tier accuracy | 93.3% | 90.0% | **96.7%** |
+| RED emergencies caught | 5/5 | 5/5 | 5/5 |
+| Care-plan faithfulness (LLM judge) | 0.97 | 0.96 | 0.96 |
+| Mean check-in cost | $0.0048 | $0.0049 | $0.0053 |
+| Graph nodes / compiled graphs / orchestration LOC | 5 / 2 / 56 | 3 / 1 / 41 | 3 / 1 / 41 |
 
----
+- **Collapsing the agents cost nothing measurable.** Quality and cost are flat — the differences are
+  LLM sampling noise, since the prompts are byte-identical — while graph nodes drop from 5 to 3 and
+  orchestration code by about a quarter.
+  The four removed boundaries were a sequential pipeline over one patient, not independent specialists.
+- **What it trades away:** per-stage observability. Nexus's separate nodes make it slightly easier to
+  see which stage a bug lives in.
+- **The real risk was elsewhere.** The evaluation surfaced keyword-based escalation as the dominant
+  safety failure in *both* systems, which Hub v2 fixes (below).
 
-### Architecture
+## Architecture
 
-| | Nexus | Hub |
-|---|---|---|
-| Agents / nodes | 5 nodes across **2** compiled graphs | **3** nodes in **1** compiled graph |
-| Intake → Care Plan | graph edge | plain Python call (internal phase-chain) |
-| Monitoring → Admin | graph edge | plain Python call (internal phase-chain) |
-| Monitoring → Escalation | graph edge | **still a graph edge** (the one preserved boundary) |
-| Escalation → Admin follow-up | graph edge | graph edge (`recovery_agent_admin` wrapper) |
+| Nexus | Hub |
+|---|---|
+| ![Nexus: 5 agents across 2 graphs](docs/images/nexus_workflow.png) | ![Hub: 1 agent plus escalation in 1 graph](docs/images/hub_workflow.png) |
 
+Only one hand-off is a genuine judgment call that can trigger a real-world action (an SMS, a 911
+screen): the gate into **Escalation**. Hub keeps that as a real graph edge and folds intake, care plan,
+monitoring and admin into one **Recovery Agent** that branches internally on `state["phase"]`.
+
+- `agents/recovery_agent.py` — the consolidated agent, one public function `run_recovery_agent()`
+- `agents/escalation_agent.py` — the preserved boundary, plus the v2 tiering logic
+- `agents/orchestrator.py` — one LangGraph graph, three nodes
+- `instrumentation/usage_tracker.py` — wraps every Claude call and logs tokens, cost and latency, so the
+  comparison uses measured numbers, not estimates
+
+Tools, state schema, system prompts and the Streamlit UI are copied from Nexus **on purpose**: keeping
+them identical means any measured difference comes from orchestration alone. That is why
+`ui/streamlit_app.py` is nearly the same file in both repos.
+
+## Hub v2 — fixing the escalation tier
+
+The evaluation's dominant failure: paraphrased emergencies ("I feel like I'm suffocating", "an elephant
+on my chest") slipped past the literal keyword list and were under-tiered. Hub v2 adds three changes,
+opt-in via `HUB_V2=1` so the default behaviour matches Nexus:
+
+1. **Two-layer tiering** — the keyword check stays as a deterministic floor, an LLM triage call judges
+   meaning, and the *more urgent* answer wins. The LLM can raise a tier but never lower it, so a timeout
+   or bad response can't downgrade a real emergency.
+2. **Trend floor** — two or more consecutive YELLOW days before a RED lift the tier to at least TIER_2.
+3. **Breathlessness guardrail** — a GREEN check-in with non-negated shortness-of-breath language is
+   floored at YELLOW.
+
+Result: escalation-tier accuracy 90.0% → 96.7%, RED tier exactly right 3/5 → 4/5, and **no unsafe
+under-escalations** — the one remaining miss over-escalates a borderline case. Added cost: one Claude
+call (~$0.0027), only on RED check-ins.
+
+These guarantees are pinned down in tests: `tests/test_escalation_tier.py` checks that v1 misses the
+paraphrases, that the LLM layer can raise but never lower a tier, that an LLM failure falls back to the
+keyword floor, and the trend floor; `tests/test_dyspnea_guardrail.py` covers negation handling.
+
+## Run it
+
+```bash
+git clone https://github.com/raghavanlakshmi/hub.git
+cd hub
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env              # add your keys
+streamlit run ui/streamlit_app.py # HUB_V2=1 for the v2 escalation logic
 ```
-                ┌──────────────────────────────────────┐
-   run_intake → │            recovery_agent             │
-run_daily_checkin             (intake│careplan│monitoring│admin)
-                └──────────────────────────────────────┘
-                             │ RED only
-                             ▼
-                      escalation_agent      ← the one load-bearing boundary
-                             │ TIER_1/TIER_2
-                             ▼
-                    recovery_agent_admin (admin follow-up)
+
+Requires `ANTHROPIC_API_KEY` and a Pinecone index (1024 dimensions, cosine) named to match
+`PINECONE_INDEX_NAME`. Twilio, Gmail, ElevenLabs and Nebius are optional. Voice check-in needs `ffmpeg`.
+Demo discharge PDFs are in the [Nexus repo](https://github.com/raghavanlakshmi/nexus/tree/main/data).
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q tests         # offline, no API keys needed
 ```
 
-- **`agents/recovery_agent.py`** — one file, one public function `run_recovery_agent()`, consolidating four of Nexus's five agents with internal phase-chaining.
-- **`agents/escalation_agent.py`** — copied verbatim from Nexus (including the known keyword-matching limitation in `determine_escalation_tier()`). The Week 4 fix for that limitation is opt-in behind `HUB_V2` — see [Hub v2](#hub-v2--fixing-the-escalation-tier-week-4) below.
-- **`agents/orchestrator.py`** — one compiled LangGraph graph, three nodes, two conditional edges.
-- **`instrumentation/usage_tracker.py`** — *new in Hub.* `tracked_claude_call()` wraps every Claude call and logs tokens/cost/latency into `state["token_log"]`, so the comparison uses real measured numbers, not estimates.
+## Tech stack
 
-What is copied **verbatim** from Nexus: all four tools (`pdf_parser`, `pinecone_store`, `openfda`, `notification_tool`), `elevenlabs_stt`, the `RecoveryState` schema (plus two fields: `phase`, `token_log`), and all three system prompts (`INTAKE`, `CARE_PLAN`, `MONITORING`). This is intentional — keeping them identical means any measured difference is attributable to orchestration alone.
+LangGraph · Claude (`claude-sonnet-4-6`) · Nebius Token Factory (`Llama-3.3-70B-Instruct`) · Pinecone ·
+Streamlit · PyMuPDF · OpenFDA · ElevenLabs speech-to-text · Twilio · Gmail SMTP · LangSmith · pytest
 
----
+<details>
+<summary><b>Single-run trace comparison (GREEN and RED check-ins)</b></summary>
 
-### Tech stack
+One run each of the same discharge PDF (`01_chf_john_demo.pdf`) and check-in through both systems.
 
-LangGraph · Python · Claude `claude-sonnet-4-6` (Anthropic API) · Pinecone · Streamlit · PyMuPDF · OpenFDA API · Twilio · Gmail SMTP · ElevenLabs (STT) · Nebius Token Factory (`meta-llama/Llama-3.3-70B-Instruct`).
-
----
-
-### Setup
-
-1. **Create the virtual environment and install dependencies**
-
-   ```bash
-   git clone https://github.com/raghavanlakshmi/hub.git
-   cd hub
-   python -m venv venv
-   venv\Scripts\activate            # Windows PowerShell
-   # source venv/Scripts/activate   # Git Bash
-   pip install -r requirements.txt
-   ```
-
-   > Uses the `pinecone` package (v9.x), **not** the deprecated `pinecone-client`.
-
-2. **Configure secrets** — copy `.env.example` to `.env` and fill in your keys:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-   `.env` is gitignored and never committed. Reusing Nexus's API keys is fine (accounts, not code).
-
-3. **Create a fresh Pinecone index**
-   - Name: `hub` (a **different** index from Nexus's, so stored data never mixes)
-   - Dimensions: `1024`
-   - Metric: `cosine`
-
-4. **Run the app**
-
-   ```bash
-   streamlit run ui/streamlit_app.py
-   ```
-
----
-
-### UI
-
-Seven Streamlit screens (soft theme via `.streamlit/config.toml`), copied from Nexus with only the orchestrator call sites swapped:
-Onboarding · Care plan · Daily check-in (ElevenLabs voice + typed fallback) · Approval queue · Recovery dashboard · Provider summary · Hospital history — **plus** a Hub-only **System Usage (Debug)** page that surfaces live token/cost/latency from `summarize_usage()`.
-
----
-
-### The comparison (Phase 10)
-
-Run the **same** discharge PDF (`data/01_chf_john_demo.pdf`, from the [Nexus repo](https://github.com/raghavanlakshmi/nexus/tree/main/data)) and the **same** check-in through both Nexus and Hub. Results below are from one run each: `01_chf_john_demo.pdf` intake + care plan + one GREEN daily check-in (2026-06-23).
-
-| Metric | Nexus (5 agents) | Hub (1 agent) |
+| GREEN run | Nexus | Hub |
 |---|---|---|
-| Total Claude calls | 3 | 3 |
-| Total input tokens | 2456 | 2454 |
-| Total output tokens | 3078 | 2761 |
-| Total cost (USD) | $0.0535 | $0.0488 |
-| Total latency | 45.8 s | 42.4 s |
-| Graph nodes | 5 (across 2 graphs) | 3 (in 1 graph) |
-| `add_node` / `add_edge` / conditional edges | 5 / 3 / 2 | 3 / 2 / 1 |
-| `.compile()` calls | 2 | 1 |
-| Orchestration code (non-blank, non-comment lines) | 56 | 41 |
+| Claude calls | 3 | 3 |
+| Input tokens | 2456 | 2454 |
+| Output tokens | 3078 | 2761 |
+| Cost | $0.0535 | $0.0488 |
+| Latency | 45.8 s | 42.4 s |
 
-**Reading the results:**
-
-- **Input tokens are identical to within 2 tokens** (2456 vs 2454; careplan input is *exactly* 1005 in both). Input is the part orchestration controls — so this is the empirical proof of the hypothesis: **collapsing 5 agents into 1 changed the wiring, not the model workload.**
-- **The cost / latency / output-token differences are LLM nondeterminism, not architecture.** Almost the entire gap is one cell — careplan output (Nexus 2188 vs Hub 1860 tokens): same prompt, same call, Claude just wrote a longer plan in the Nexus run. Re-run and the two could swap. The ~$0.005 difference is noise, not a structural saving.
-- **Where Hub genuinely wins is structural** — 3 nodes vs 5, 1 compiled graph vs 2, 1 conditional edge vs 2, ~15 fewer lines of orchestration code (41 vs 56) — exactly the prediction. (Hub's `orchestrator.py` is actually *longer* in raw lines because it carries heavy explanatory comments; the code itself is leaner.)
-
-> Bottom line: for this pipeline, the five-agent split bought **no measurable token/cost benefit** — the agents were a sequential pipeline over one patient, not independent specialists. The single load-bearing boundary (escalation) is preserved in both. The trade Hub makes is *less orchestration code* for *less per-node observability* — Nexus's separate nodes make it marginally easier to see which stage a bug lives in.
-
-#### RED-path run — the preserved boundary firing (2026-06-23)
-
-Both projects were run with a **RED** check-in ("Chest pain or pressure") to exercise the one hand-off that still goes through the graph. The two are nearly indistinguishable:
-
-| RED-run total | Nexus (5 agents) | Hub (1 agent) |
+| RED run | Nexus | Hub |
 |---|---|---|
 | Claude calls | 3 | 3 |
 | Input tokens | 2473 | 2470 |
 | Output tokens | 3004 | 2986 |
-| Total cost | $0.0525 | $0.0522 |
-| Total latency | 48.5 s | 48.5 s |
+| Cost | $0.0525 | $0.0522 |
+| Latency | 48.5 s | 48.5 s |
 
-Per-phase (Hub run shown; Nexus within a few tokens at each phase):
+Input tokens — the part orchestration controls — match to within 3 tokens. The output and cost gaps
+come almost entirely from one care-plan call where Claude happened to write a longer plan: noise, not
+architecture. A RED check-in is still a single Claude call in both, so the escalation boundary is pure
+routing with zero token cost.
 
-| Phase | Calls | In / Out tokens | Cost | Latency |
-|---|---|---|---|---|
-| intake | 1 | 798 / 785 | $0.0142 | 8.6 s |
-| careplan | 1 | 1005 / 1888 | $0.0313 | 32.6 s |
-| monitoring (RED) | 1 | 667 / 313 | $0.0067 | 7.3 s |
-
-The **monitoring** call's `monitoring (RED)` row is the tell: Nexus 669/297, Hub 667/313 — near-identical input (the same RED check-in), output within LLM variance. Compared to the GREEN run (107 output tokens), the RED call emits ~300 output tokens — the fuller RED JSON (flags + `escalation_reason`). Cost within **$0.0003** and latency identical to the tenth of a second. Crucially, a RED check-in is **still just 1 Claude call** in both — `escalation_agent` and `admin` make no model calls, so the escalation boundary adds **zero** token cost; it is pure routing.
-
-Terminal log of the run (the architectural payoff — watch the log prefix change from `[Recovery Agent: …]` to `[Escalation Agent]`, which marks crossing from the consolidated node into the separate escalation node):
+The logs show the structural difference: Hub prints one `[Recovery Agent: …]` block and a single
+crossing into `[Escalation Agent]`; Nexus prints a separate prefix at every stage.
 
 ```
-[Recovery Agent: intake] Starting...
 [Recovery Agent: intake] PDF parsed. 2 pages, 1541 chars.
 [usage] intake: 798 in / 785 out | $0.0142 | 8595ms
-[Recovery Agent: intake] Complete. Diagnosis: Congestive Heart Failure (CHF) Exacerbation
-[Recovery Agent: careplan] Starting...
 [Recovery Agent: careplan] Checking 4 medications via OpenFDA...
-[Recovery Agent: careplan] 1 medications flagged.
 [usage] careplan: 1005 in / 1888 out | $0.0313 | 32605ms
-[Nebius] Skipped — NEBIUS_API_KEY not set (optional integration).
-[Recovery Agent: careplan] Complete.
-[Recovery Agent: monitoring] Processing Day 2 check-in...
 [usage] monitoring: 667 in / 313 out | $0.0067 | 7264ms
-[Recovery Agent: monitoring] Classification: RED      ← consolidated node, monitoring phase
-[Escalation Agent] RED flag detected. Determining tier...   ← graph edge fired into the SEPARATE escalation node
+[Recovery Agent: monitoring] Classification: RED
+[Escalation Agent] RED flag detected. Determining tier...   ← the one graph edge
 [Escalation Agent] Tier: TIER_3
-[Notification] SMS skipped — Twilio credentials not configured.
 ```
 
-> **Note:** this Hub log was captured *before* the escalation→admin parity fix (2026-06-24). At capture time Hub sent TIER_3 straight to `END` and skipped the admin follow-up. After the fix, Hub's `escalation_agent → recovery_agent_admin` edge is unconditional (mirroring Nexus), so a re-run now also prints the admin step (`[Recovery Agent: admin] Running daily task check...` / `Done. Actions: []`). Behavior is now identical to Nexus; only the node *structure* differs.
+</details>
 
-For contrast, here is **Nexus's** terminal for the same RED check-in. Note that *every* stage prints its own agent prefix — there is a node boundary at each hand-off, not just at escalation:
+## Safety & data
 
-```
-[Intake Agent] Starting...
-[Intake Agent] PDF parsed. 2 pages, 1541 chars.
-[usage] intake: 799 in / 773 out | $0.0140 | 11473ms
-[Intake Agent] Complete. Diagnosis: Congestive Heart Failure (CHF) Exacerbation
-[Care Plan Agent] Starting...
-[Care Plan Agent] Checking 4 medications via OpenFDA...
-[Care Plan Agent] 1 medications flagged.
-[usage] careplan: 1005 in / 1934 out | $0.0320 | 30309ms
-[Care Plan Agent] Complete.
-[Nebius] Care plan generation complete.          ← Nebius ran here (Nexus has NEBIUS_API_KEY set)
-[Monitoring Agent] Processing Day 2 check-in...
-[usage] monitoring: 669 in / 297 out | $0.0065 | 6716ms
-[Monitoring Agent] Classification: RED
-[Escalation Agent] RED flag detected. Determining tier...
-[Escalation Agent] Tier: TIER_3
-[Notification] SMS not sent (Twilio error 21659 — country mismatch).
-[Admin Agent] Running daily task check...         ← admin runs after escalation (unconditional edge)
-[Admin Agent] Done. Actions: []
-```
+- Synthetic discharge data only. Not medical advice — in an emergency, call 911.
+- Clinical content — provider messages and medication-conflict alerts — waits in a human approval queue.
+  Sent automatically: appointment reminders and weekly summaries to the caregiver, and an SMS to the
+  emergency contact on a Tier 2/3 escalation, only if the patient consented.
 
-The difference is purely structural: Hub logs one `[Recovery Agent: …]` block (intake/careplan/monitoring/admin all in one node) with a single crossing into `[Escalation Agent]`; Nexus logs five separate agent prefixes because each stage is its own graph node. Same tools, same prompts, same model calls, same outcome (TIER_3 → **🚨 CALL 911 NOW**) — `escalation_agent.py` is a byte-for-byte copy, including `determine_escalation_tier()` and its known keyword-matching limitation.
-
----
-
-### Hub v2 — fixing the escalation tier (Week 4)
-
-Evaluating Hub against a 30-case labelled golden dataset showed the dominant failure: paraphrased
-emergencies ("I feel like I'm suffocating", "an elephant on my chest") slipped past the literal
-keyword list and were under-tiered (TIER_3 → TIER_2). Hub v2 adds three changes, all opt-in via
-the `HUB_V2` environment variable so the default behaviour is unchanged:
-
-1. **Two-layer escalation tier** — the keyword check stays as a deterministic floor, an LLM triage
-   call judges meaning, and the *more urgent* of the two wins. The LLM can raise a tier but never
-   lower it, so a timeout or bad parse can't downgrade a real emergency.
-2. **Trend floor** — two or more consecutive YELLOW days before a RED lift the tier to at least TIER_2.
-3. **Dyspnea guardrail** — a GREEN check-in that mentions breathlessness is floored at YELLOW.
-
-| Metric (30 cases) | Hub v1 | Hub v2 |
-|---|---|---|
-| Escalation-tier accuracy | 90.0% | 96.7% |
-| RED tier exactly correct (5) | 60% | 80% |
-| Unsafe under-escalations | — | none |
-
-The one remaining miss is a safe over-escalation on a borderline case. Added cost: one extra Claude
-call (~$0.0027), only on RED check-ins.
-
-```bash
-HUB_V2=1 streamlit run ui/streamlit_app.py
-```
-
----
-
-### Safety & data
-
-- Uses **synthetic** discharge data only (`data/`). No real patient data.
-- Not medical advice. In an emergency, call 911.
-- All outbound messages (provider drafts, escalations) require human approval before sending.
-
----
-
-### License
+## License
 
 [MIT](LICENSE)

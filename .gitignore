@@ -10,6 +10,6 @@ data/*.json
 
 # Local-only presentation / comparison artifacts (not part of the app)
 *.docx
-nexus_workflow.png
-hub_workflow.png
+/nexus_workflow.png
+/hub_workflow.png
 generate_comparison_doc.py
