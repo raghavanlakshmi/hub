@@ -1,7 +1,7 @@
 # Hub
 ## Post-Hospital Recovery Co-Pilot — 2-Agent Architecture | Companion project to Nexus
 
-Hub is a deliberately minimal redesign of [Nexus](../nexus), built to answer one question with running code instead of theory:
+Hub is a deliberately minimal redesign of [Nexus](https://github.com/raghavanlakshmi/nexus), built to answer one question with running code instead of theory:
 
 > If you collapse Nexus's five agents into a single agent and keep **only** the one load-bearing boundary — the gate in front of Escalation — what actually changes in tokens, cost, latency, and orchestration complexity?
 
@@ -41,7 +41,7 @@ run_daily_checkin             (intake│careplan│monitoring│admin)
 ```
 
 - **`agents/recovery_agent.py`** — one file, one public function `run_recovery_agent()`, consolidating four of Nexus's five agents with internal phase-chaining.
-- **`agents/escalation_agent.py`** — copied verbatim from Nexus, unchanged (including the known keyword-matching limitation in `determine_escalation_tier()`).
+- **`agents/escalation_agent.py`** — copied verbatim from Nexus (including the known keyword-matching limitation in `determine_escalation_tier()`). The Week 4 fix for that limitation is opt-in behind `HUB_V2` — see [Hub v2](#hub-v2--fixing-the-escalation-tier-week-4) below.
 - **`agents/orchestrator.py`** — one compiled LangGraph graph, three nodes, two conditional edges.
 - **`instrumentation/usage_tracker.py`** — *new in Hub.* `tracked_claude_call()` wraps every Claude call and logs tokens/cost/latency into `state["token_log"]`, so the comparison uses real measured numbers, not estimates.
 
@@ -60,7 +60,8 @@ LangGraph · Python · Claude `claude-sonnet-4-6` (Anthropic API) · Pinecone ·
 1. **Create the virtual environment and install dependencies**
 
    ```bash
-   cd week3/hub
+   git clone https://github.com/raghavanlakshmi/hub.git
+   cd hub
    python -m venv venv
    venv\Scripts\activate            # Windows PowerShell
    # source venv/Scripts/activate   # Git Bash
@@ -99,7 +100,7 @@ Onboarding · Care plan · Daily check-in (ElevenLabs voice + typed fallback) ·
 
 ### The comparison (Phase 10)
 
-Run the **same** discharge PDF (`data/01_chf_john_demo.pdf`) and the **same** check-in through both Nexus and Hub. Results below are from one run each: `01_chf_john_demo.pdf` intake + care plan + one GREEN daily check-in (2026-06-23).
+Run the **same** discharge PDF (`data/01_chf_john_demo.pdf`, from the [Nexus repo](https://github.com/raghavanlakshmi/nexus/tree/main/data)) and the **same** check-in through both Nexus and Hub. Results below are from one run each: `01_chf_john_demo.pdf` intake + care plan + one GREEN daily check-in (2026-06-23).
 
 | Metric | Nexus (5 agents) | Hub (1 agent) |
 |---|---|---|
@@ -193,8 +194,42 @@ The difference is purely structural: Hub logs one `[Recovery Agent: …]` block 
 
 ---
 
+### Hub v2 — fixing the escalation tier (Week 4)
+
+Evaluating Hub against a 30-case labelled golden dataset showed the dominant failure: paraphrased
+emergencies ("I feel like I'm suffocating", "an elephant on my chest") slipped past the literal
+keyword list and were under-tiered (TIER_3 → TIER_2). Hub v2 adds three changes, all opt-in via
+the `HUB_V2` environment variable so the default behaviour is unchanged:
+
+1. **Two-layer escalation tier** — the keyword check stays as a deterministic floor, an LLM triage
+   call judges meaning, and the *more urgent* of the two wins. The LLM can raise a tier but never
+   lower it, so a timeout or bad parse can't downgrade a real emergency.
+2. **Trend floor** — two or more consecutive YELLOW days before a RED lift the tier to at least TIER_2.
+3. **Dyspnea guardrail** — a GREEN check-in that mentions breathlessness is floored at YELLOW.
+
+| Metric (30 cases) | Hub v1 | Hub v2 |
+|---|---|---|
+| Escalation-tier accuracy | 90.0% | 96.7% |
+| RED tier exactly correct (5) | 60% | 80% |
+| Unsafe under-escalations | — | none |
+
+The one remaining miss is a safe over-escalation on a borderline case. Added cost: one extra Claude
+call (~$0.0027), only on RED check-ins.
+
+```bash
+HUB_V2=1 streamlit run ui/streamlit_app.py
+```
+
+---
+
 ### Safety & data
 
 - Uses **synthetic** discharge data only (`data/`). No real patient data.
 - Not medical advice. In an emergency, call 911.
 - All outbound messages (provider drafts, escalations) require human approval before sending.
+
+---
+
+### License
+
+[MIT](LICENSE)

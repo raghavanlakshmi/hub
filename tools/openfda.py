@@ -2,6 +2,14 @@ import requests
 from typing import List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+try:  # LangSmith tracing decorator — no-op when tracing is disabled.
+    from langsmith import traceable
+except Exception:  # pragma: no cover
+    def traceable(*a, **k):
+        def _wrap(fn):
+            return fn
+        return _wrap(a[0]) if a and callable(a[0]) else _wrap
+
 OPENFDA_BASE = "https://api.fda.gov/drug"
 
 def _check_one_medication(med: dict, med_names: List[str]) -> List[dict]:
@@ -62,6 +70,7 @@ def _check_one_medication(med: dict, med_names: List[str]) -> List[dict]:
     return details
 
 
+@traceable(run_type="tool", name="openfda_medication_interactions")
 def check_medication_interactions(medications: List[dict]) -> dict:
     """
     Check for known drug interactions using OpenFDA.

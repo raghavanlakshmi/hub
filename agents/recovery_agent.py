@@ -118,6 +118,25 @@ Return ONLY valid JSON:
 # plus internal phase-chaining instead of graph edges (see _run_intake_logic / _run_monitoring_logic).
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _dyspnea_present(responses: dict) -> bool:
+    """True if the check-in contains NON-NEGATED shortness-of-breath language.
+    Used by the HUB_V2 guardrail to floor such cases at YELLOW. Negations like
+    'no shortness of breath' / "isn't short of breath" do not trigger it."""
+    text = json.dumps(responses).lower()
+    terms = ["short of breath", "shortness of breath", "out of breath", "winded",
+             "suffocat", "can't catch", "cannot catch", "hard to breathe",
+             "trouble breathing", "struggling to breathe", "air hunger"]
+    negations = ("no ", "not ", "without ", "deny", "denies", "n't ", "never ")
+    for t in terms:
+        i = text.find(t)
+        while i != -1:
+            window = text[max(0, i - 14):i]
+            if not any(neg in window for neg in negations):
+                return True
+            i = text.find(t, i + 1)
+    return False
+
+
 def _run_intake_logic(state: dict) -> dict:
     """Was Nexus's run_intake_agent(). Chains directly into care plan on success."""
     client = Anthropic()
@@ -376,6 +395,18 @@ def _run_monitoring_logic(state: dict, check_in_responses: dict) -> dict:
             "recommended_action": "Please call your doctor's office if you have any concerns.",
             "escalation_reason": None
         }
+
+    # ── v2 improvement (Week 4): dyspnea under-classification guardrail ──────────
+    # Gated behind HUB_V2. Fixes the recurring baseline miss on borderline cases like
+    # "a little short of breath when I carried laundry" that intermittently classify
+    # GREEN. Any NON-NEGATED shortness-of-breath language forces at least YELLOW
+    # (a safety-biased floor on a YELLOW/GREEN boundary the LLM samples inconsistently).
+    if os.getenv("HUB_V2") and result.get("classification") == "GREEN" and _dyspnea_present(check_in_responses):
+        result["classification"] = "YELLOW"
+        result.setdefault("flags", []).append(
+            "V2_GUARDRAIL: non-negated shortness-of-breath language - upgraded GREEN to YELLOW")
+        result["summary"] = "Possible shortness of breath reported - flagged for review (v2 guardrail)."
+        print("[Recovery Agent: monitoring] v2 guardrail upgraded GREEN to YELLOW (dyspnea language).")
 
     check_in_record = {
         "day": state["recovery_day"],

@@ -1,6 +1,15 @@
 import fitz  # PyMuPDF
 from pathlib import Path
 
+try:  # LangSmith tracing decorator — no-op when tracing is disabled.
+    from langsmith import traceable
+except Exception:  # pragma: no cover
+    def traceable(*a, **k):
+        def _wrap(fn):
+            return fn
+        return _wrap(a[0]) if a and callable(a[0]) else _wrap
+
+@traceable(run_type="tool", name="parse_discharge_pdf")
 def parse_discharge_pdf(file_path: str) -> dict:
     """
     Extract raw text from discharge summary PDF.
